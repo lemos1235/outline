@@ -51,14 +51,17 @@ type Props = {
   animatePresence?: boolean;
   /** Text to highlight at the top of the comment */
   highlightedText?: string;
-  /** The text direction of the editor */
-  dir?: "rtl" | "ltr";
   /** Callback when the editor is focused */
   onFocus?: () => void;
   /** Callback when the editor is blurred */
   onBlur?: () => void;
   /** Callback when user presses up arrow at the start of the editor */
   onUpArrowAtStart?: () => void;
+  /**
+   * Callback invoked when a new top-level comment is about to be created,
+   * just before it is added to the store. Receives the generated comment id.
+   */
+  onBeforeCreate?: (commentId: string) => void;
 };
 
 function CommentForm({
@@ -70,12 +73,12 @@ function CommentForm({
   onFocus,
   onBlur,
   onUpArrowAtStart,
+  onBeforeCreate,
   autoFocus,
   standalone,
   placeholder,
   animatePresence,
   highlightedText,
-  dir,
   ...rest
 }: Props) {
   const { editor } = useDocumentContext();
@@ -102,6 +105,11 @@ function CommentForm({
   }, [editor, thread]);
 
   useOnClickOutside(formRef, reset);
+
+  React.useEffect(() => {
+    window.addEventListener("beforeunload", reset);
+    return () => window.removeEventListener("beforeunload", reset);
+  }, [reset]);
 
   const handleCreateComment = action(async (event: React.FormEvent) => {
     event.preventDefault();
@@ -165,6 +173,9 @@ function CommentForm({
     );
 
     comment.id = uuidv4();
+    if (!thread) {
+      onBeforeCreate?.(comment.id);
+    }
     comments.add(comment);
 
     comment
@@ -254,11 +265,13 @@ function CommentForm({
   const handleMounted = React.useCallback(
     (ref) => {
       if (autoFocus && ref && !hasFocusedOnMount.current) {
-        ref.focusAtStart();
+        if (!draft) {
+          ref.focusAtStart();
+        }
         hasFocusedOnMount.current = true;
       }
     },
-    [autoFocus]
+    [autoFocus, draft]
   );
 
   const presence = animatePresence
@@ -299,7 +312,7 @@ function CommentForm({
           tabIndex={-1}
         />
       </VisuallyHidden.Root>
-      <Flex gap={8} align="flex-start" reverse={dir === "rtl"}>
+      <Flex gap={8} align="flex-start">
         <Avatar model={user} size={24} style={{ marginTop: 8 }} />
         <Bubble
           gap={10}
@@ -334,7 +347,7 @@ function CommentForm({
             />
           </React.Suspense>
           {(inputFocused || draft) && (
-            <Flex justify="space-between" reverse={dir === "rtl"} gap={8}>
+            <Flex justify="space-between" gap={8}>
               <HStack>
                 <ButtonSmall type="submit" borderOnHover>
                   {thread && !thread.isNew ? t("Reply") : t("Post")}

@@ -1,6 +1,6 @@
 import copy from "copy-to-clipboard";
 import invariant from "invariant";
-import uniqBy from "lodash/uniqBy";
+import { capitalize, uniqBy } from "es-toolkit/compat";
 import {
   DownloadIcon,
   DuplicateIcon,
@@ -39,11 +39,13 @@ import { toast } from "sonner";
 import Icon from "@shared/components/Icon";
 import type { NavigationNode } from "@shared/types";
 import { ExportContentType, TeamPreference } from "@shared/types";
+import { isMobile } from "@shared/utils/browser";
 import { getEventFiles } from "@shared/utils/files";
 import { Week } from "@shared/utils/time";
 import type UserMembership from "~/models/UserMembership";
 import { client } from "~/utils/ApiClient";
 import DocumentDelete from "~/scenes/DocumentDelete";
+import { ProsemirrorHelper } from "~/models/helpers/ProsemirrorHelper";
 import DocumentPermanentDelete from "~/scenes/DocumentPermanentDelete";
 import DocumentPublish from "~/scenes/DocumentPublish";
 import DeleteDocumentsInTrash from "~/scenes/Trash/components/DeleteDocumentsInTrash";
@@ -79,7 +81,7 @@ import {
   trashPath,
   documentEditPath,
 } from "~/utils/routeHelpers";
-import capitalize from "lodash/capitalize";
+import { documentBreadcrumbText } from "~/components/DocumentBreadcrumb";
 import CollectionIcon from "~/components/Icons/CollectionIcon";
 import type {
   Action,
@@ -107,19 +109,21 @@ export const openDocument = createActionWithChildren({
   shortcut: ["o", "d"],
   keywords: "go to",
   icon: <DocumentIcon />,
-  children: ({ stores }) => {
+  children: ({ stores, t }) => {
     const nodes = stores.collections.navigationNodes.reduce(
       (acc, node) => [...acc, ...node.children],
       [] as NavigationNode[]
     );
     const documents = stores.documents.orderedData;
 
-    return uniqBy([...documents, ...nodes], "id").map((item) =>
-      createInternalLinkAction({
+    return uniqBy([...documents, ...nodes], "id").map((item) => {
+      const document = stores.documents.get(item.id);
+      return createInternalLinkAction({
         // Note: using url which includes the slug rather than id here to bust
         // cache if the document is renamed
         id: item.url,
         name: item.title,
+        description: document ? documentBreadcrumbText(document, t) : undefined,
         icon: item.icon ? (
           <Icon
             value={item.icon}
@@ -127,12 +131,12 @@ export const openDocument = createActionWithChildren({
             color={item.color ?? undefined}
           />
         ) : (
-          <DocumentIcon />
+          <DocumentIcon outline={item.isDraft} />
         ),
         section: DocumentSection,
         to: item.url,
-      })
-    );
+      });
+    });
   },
 });
 
@@ -236,6 +240,26 @@ function findDocumentSiblingIndex(
   return siblings?.findIndex((node) => node.id === document.id) ?? -1;
 }
 
+/**
+ * Determines whether the user can create a sibling of the given document.
+ * A sibling shares the document's parent, so this mirrors the backend's
+ * create authorization: create permission on the parent document, or on the
+ * collection when the document is at the root.
+ *
+ * @param stores - the root stores.
+ * @param document - the document to create a sibling of.
+ * @returns true if the user can create a sibling.
+ */
+function canCreateSiblingDocument(
+  stores: ActionContext["stores"],
+  document: { collectionId?: string | null; parentDocumentId?: string }
+): boolean {
+  return document.parentDocumentId
+    ? stores.policies.abilities(document.parentDocumentId).createChildDocument
+    : !!document.collectionId &&
+        stores.policies.abilities(document.collectionId).createDocument;
+}
+
 export const createNestedDocument = createInternalLinkAction({
   name: ({ t }) => t("Nested document"),
   analyticsName: "New document",
@@ -268,10 +292,14 @@ const createDocumentBefore = createInternalLinkAction({
       return false;
     }
     const document = stores.documents.get(activeDocumentId);
-    return (
-      !!document?.collectionId &&
-      stores.policies.abilities(currentTeamId).createDocument
-    );
+    if (!document?.collectionId) {
+      return false;
+    }
+    const collection = stores.collections.get(document.collectionId);
+    if (collection?.sort.field === "title") {
+      return false;
+    }
+    return canCreateSiblingDocument(stores, document);
   },
   to: ({ activeDocumentId, stores, sidebarContext }) => {
     const document = activeDocumentId
@@ -306,10 +334,14 @@ const createDocumentAfter = createInternalLinkAction({
       return false;
     }
     const document = stores.documents.get(activeDocumentId);
-    return (
-      !!document?.collectionId &&
-      stores.policies.abilities(currentTeamId).createDocument
-    );
+    if (!document?.collectionId) {
+      return false;
+    }
+    const collection = stores.collections.get(document.collectionId);
+    if (collection?.sort.field === "title") {
+      return false;
+    }
+    return canCreateSiblingDocument(stores, document);
   },
   to: ({ activeDocumentId, stores, sidebarContext }) => {
     const document = activeDocumentId
@@ -334,6 +366,18 @@ const createDocumentAfter = createInternalLinkAction({
   },
 });
 
+function isAlphabeticallySorted(
+  stores: ActionContext["stores"],
+  activeDocumentId: string
+): boolean {
+  const document = stores.documents.get(activeDocumentId);
+  if (!document?.collectionId) {
+    return false;
+  }
+  const collection = stores.collections.get(document.collectionId);
+  return collection?.sort.field === "title";
+}
+
 export const createNewDocument = createActionWithChildren({
   name: ({ t }) => t("New document"),
   analyticsName: "New document",
@@ -341,16 +385,47 @@ export const createNewDocument = createActionWithChildren({
   icon: <NewDocumentIcon />,
   keywords: "create",
   visible: ({ currentTeamId, activeDocumentId, stores }) => {
-    if (!activeDocumentId) {
+    if (!activeDocumentId || !currentTeamId) {
       return false;
     }
-
-    return (
-      !!currentTeamId && stores.policies.abilities(currentTeamId).createDocument
-    );
+    if (!stores.policies.abilities(currentTeamId).createDocument) {
+      return false;
+    }
+    return !isAlphabeticallySorted(stores, activeDocumentId);
   },
   children: [createDocumentBefore, createDocumentAfter, createNestedDocument],
 });
+
+export const createNewDocumentInAlphabeticalCollection =
+  createInternalLinkAction({
+    name: ({ t }) => t("New document"),
+    analyticsName: "New document",
+    section: ActiveDocumentSection,
+    icon: <NewDocumentIcon />,
+    keywords: "create",
+    visible: ({ currentTeamId, activeDocumentId, stores }) => {
+      if (!activeDocumentId || !currentTeamId) {
+        return false;
+      }
+      if (!stores.policies.abilities(currentTeamId).createDocument) {
+        return false;
+      }
+      if (!stores.policies.abilities(activeDocumentId).createChildDocument) {
+        return false;
+      }
+      return isAlphabeticallySorted(stores, activeDocumentId);
+    },
+    to: ({ activeDocumentId, sidebarContext }) => {
+      const [pathname, search] =
+        newNestedDocumentPath(activeDocumentId).split("?");
+
+      return {
+        pathname,
+        search,
+        state: { sidebarContext },
+      };
+    },
+  });
 
 export const starDocument = createAction({
   name: ({ t }) => t("Star"),
@@ -737,8 +812,6 @@ export const copyDocumentAsPlainText = createAction({
       ? stores.documents.get(activeDocumentId)
       : undefined;
     if (document) {
-      const { ProsemirrorHelper } =
-        await import("~/models/helpers/ProsemirrorHelper");
       copy(ProsemirrorHelper.toPlainText(document));
       toast.success(t("Text copied to clipboard"));
     }
@@ -970,7 +1043,11 @@ export const openDocumentInDesktop = createAction({
     }
     const document = stores.documents.get(activeDocumentId);
     return (
-      isCloudHosted && (isMac || isWindows) && !!document && !document.isDeleted
+      isCloudHosted &&
+      (isMac || isWindows) &&
+      !!document &&
+      !document.isDeleted &&
+      !isMobile()
     );
   },
   perform: ({ activeDocumentId, stores }) => {
@@ -988,9 +1065,14 @@ export const presentDocument = createAction({
   analyticsName: "Present document",
   section: ActiveDocumentSection,
   icon: <EmbedIcon />,
-  shortcut: ["Meta+Alt+p"],
-  visible: ({ activeDocumentId }) => !!activeDocumentId,
+  shortcut: ["Control+Alt+KeyP"],
+  visible: ({ activeDocumentId }) => !!activeDocumentId && !isMobile(),
   perform: ({ activeDocumentId, stores }) => {
+    if (stores.ui.presentationData) {
+      stores.ui.setPresentingDocument(null);
+      return;
+    }
+
     const document = activeDocumentId
       ? stores.documents.get(activeDocumentId)
       : undefined;
@@ -1520,6 +1602,7 @@ export const rootDocumentActions = [
   createDocument,
   createDraftDocument,
   createNewDocument,
+  createNewDocumentInAlphabeticalCollection,
   createNestedDocument,
   createTemplateFromDocument,
   deleteDocument,

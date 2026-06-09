@@ -14,7 +14,9 @@ import type {
 } from "@shared/types";
 import type { BaseSchema } from "@server/routes/api/schema";
 import type { AccountProvisionerResult } from "./commands/accountProvisioner";
+import type { OAuthIntent, OAuthState } from "./utils/oauthState";
 import type {
+  AccessRequest,
   ApiKey,
   Attachment,
   AuthenticationProvider,
@@ -76,6 +78,8 @@ export type AppState = {
   transaction: Transaction;
   pagination: Pagination;
   oauthClient?: OAuthClient;
+  oauthIntent?: OAuthIntent;
+  oauthState?: OAuthState;
 };
 
 export type AppContext = ParameterizedContext<AppState, DefaultContext>;
@@ -162,7 +166,8 @@ export type UserEvent = BaseEvent<User> &
           | "users.update"
           | "users.suspend"
           | "users.activate"
-          | "users.delete";
+          | "users.delete"
+          | "users.invite_accepted";
         userId: string;
       }
     | {
@@ -247,6 +252,7 @@ export type DocumentEvent = BaseEvent<Document> &
         createdAt: string;
       }
     | DocumentMovedEvent
+    | AccessRequestEvent
   );
 
 export type TemplateEvent = BaseEvent<Document> & {
@@ -305,6 +311,12 @@ export type DocumentUserEvent = BaseEvent<UserMembership> & {
   data: {
     isNew?: boolean;
   };
+};
+
+export type AccessRequestEvent = BaseEvent<AccessRequest> & {
+  name: "access_requests.create";
+  modelId: string;
+  documentId: string;
 };
 
 export type DocumentGroupEvent = BaseEvent<GroupMembership> & {
@@ -482,6 +494,7 @@ export type Event =
   | AuthenticationProviderEvent
   | DocumentEvent
   | DocumentUserEvent
+  | AccessRequestEvent
   | DocumentMovedEvent
   | DocumentGroupEvent
   | PinEvent

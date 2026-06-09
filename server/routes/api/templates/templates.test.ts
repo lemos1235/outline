@@ -1,3 +1,5 @@
+import { CollectionPermission } from "@shared/types";
+import { UserMembership } from "@server/models";
 import {
   buildAdmin,
   buildUser,
@@ -18,11 +20,7 @@ describe("#templates.list", () => {
       teamId: user.teamId,
     });
 
-    const res = await server.post("/api/templates.list", {
-      body: {
-        token: user.getJwtToken(),
-      },
-    });
+    const res = await server.post("/api/templates.list", user);
 
     const body = await res.json();
     expect(res.status).toEqual(200);
@@ -43,9 +41,8 @@ describe("#templates.list", () => {
       collectionId: collection.id,
     });
 
-    const res = await server.post("/api/templates.list", {
+    const res = await server.post("/api/templates.list", user, {
       body: {
-        token: user.getJwtToken(),
         collectionId: collection.id,
       },
     });
@@ -70,9 +67,8 @@ describe("#templates.info", () => {
       teamId: user.teamId,
     });
 
-    const res = await server.post("/api/templates.info", {
+    const res = await server.post("/api/templates.info", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
       },
     });
@@ -90,9 +86,8 @@ describe("#templates.info", () => {
 
   it("should fail for invalid template id", async () => {
     const user = await buildUser();
-    const res = await server.post("/api/templates.info", {
+    const res = await server.post("/api/templates.info", user, {
       body: {
-        token: user.getJwtToken(),
         id: "invalid",
       },
     });
@@ -110,9 +105,8 @@ describe("#templates.update", () => {
       title: "Original title",
     });
 
-    const res = await server.post("/api/templates.update", {
+    const res = await server.post("/api/templates.update", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
         title: "New title",
       },
@@ -146,9 +140,8 @@ describe("#templates.update", () => {
       ],
     };
 
-    const res = await server.post("/api/templates.update", {
+    const res = await server.post("/api/templates.update", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
         data,
       },
@@ -171,9 +164,8 @@ describe("#templates.update", () => {
       teamId: admin.teamId,
     });
 
-    const res = await server.post("/api/templates.update", {
+    const res = await server.post("/api/templates.update", admin, {
       body: {
-        token: admin.getJwtToken(),
         id: template.id,
         collectionId: targetCollection.id,
       },
@@ -197,9 +189,8 @@ describe("#templates.update", () => {
       permission: null,
     });
 
-    const res = await server.post("/api/templates.update", {
+    const res = await server.post("/api/templates.update", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
         collectionId: inaccessibleCollection.id,
       },
@@ -220,9 +211,8 @@ describe("#templates.update", () => {
     // but is not a team admin
     const user = await buildUser({ teamId: admin.teamId });
 
-    const res = await server.post("/api/templates.update", {
+    const res = await server.post("/api/templates.update", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
         collectionId: null,
       },
@@ -238,9 +228,8 @@ describe("#templates.update", () => {
       teamId: admin.teamId,
     });
 
-    const res = await server.post("/api/templates.update", {
+    const res = await server.post("/api/templates.update", admin, {
       body: {
-        token: admin.getJwtToken(),
         id: template.id,
         collectionId: null,
       },
@@ -253,9 +242,8 @@ describe("#templates.update", () => {
 
   it("should fail with status 400 bad request when id is missing", async () => {
     const user = await buildUser();
-    const res = await server.post("/api/templates.update", {
+    const res = await server.post("/api/templates.update", user, {
       body: {
-        token: user.getJwtToken(),
         title: "New title",
       },
     });
@@ -279,9 +267,8 @@ describe("#templates.duplicate", () => {
       title: "test",
     });
 
-    const res = await server.post("/api/templates.duplicate", {
+    const res = await server.post("/api/templates.duplicate", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
       },
     });
@@ -300,9 +287,8 @@ describe("#templates.duplicate", () => {
       teamId: user.teamId,
     });
 
-    const res = await server.post("/api/templates.duplicate", {
+    const res = await server.post("/api/templates.duplicate", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
         title: "New title",
       },
@@ -327,9 +313,8 @@ describe("#templates.duplicate", () => {
       teamId: admin.teamId,
     });
 
-    const res = await server.post("/api/templates.duplicate", {
+    const res = await server.post("/api/templates.duplicate", admin, {
       body: {
-        token: admin.getJwtToken(),
         id: template.id,
         collectionId: targetCollection.id,
       },
@@ -353,9 +338,8 @@ describe("#templates.duplicate", () => {
       permission: null,
     });
 
-    const res = await server.post("/api/templates.duplicate", {
+    const res = await server.post("/api/templates.duplicate", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
         collectionId: inaccessibleCollection.id,
       },
@@ -374,9 +358,8 @@ describe("#templates.duplicate", () => {
     // Non-admin member on the same team
     const user = await buildUser({ teamId: admin.teamId });
 
-    const res = await server.post("/api/templates.duplicate", {
+    const res = await server.post("/api/templates.duplicate", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
         collectionId: null,
       },
@@ -392,9 +375,8 @@ describe("#templates.duplicate", () => {
       teamId: admin.teamId,
     });
 
-    const res = await server.post("/api/templates.duplicate", {
+    const res = await server.post("/api/templates.duplicate", admin, {
       body: {
-        token: admin.getJwtToken(),
         id: template.id,
         collectionId: null,
       },
@@ -412,9 +394,8 @@ describe("#templates.duplicate", () => {
       teamId: user.teamId,
     });
 
-    const res = await server.post("/api/templates.duplicate", {
+    const res = await server.post("/api/templates.duplicate", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
       },
     });
@@ -431,9 +412,8 @@ describe("#templates.duplicate", () => {
 
   it("should fail for invalid template id", async () => {
     const user = await buildUser();
-    const res = await server.post("/api/templates.duplicate", {
+    const res = await server.post("/api/templates.duplicate", user, {
       body: {
-        token: user.getJwtToken(),
         id: "invalid",
       },
     });
@@ -450,9 +430,8 @@ describe("#templates.delete", () => {
       teamId: user.teamId,
     });
 
-    const res = await server.post("/api/templates.delete", {
+    const res = await server.post("/api/templates.delete", user, {
       body: {
-        token: user.getJwtToken(),
         id: template.id,
       },
     });
@@ -464,11 +443,7 @@ describe("#templates.delete", () => {
 
   it("should fail with status 400 bad request when id is missing", async () => {
     const user = await buildUser();
-    const res = await server.post("/api/templates.delete", {
-      body: {
-        token: user.getJwtToken(),
-      },
-    });
+    const res = await server.post("/api/templates.delete", user);
     const body = await res.json();
     expect(res.status).toEqual(400);
     expect(body.message).toEqual("id: Must be a valid UUID or slug");
@@ -477,5 +452,356 @@ describe("#templates.delete", () => {
   it("should require authentication", async () => {
     const res = await server.post("/api/templates.delete");
     expect(res.status).toEqual(401);
+  });
+});
+
+describe("templateManagement", () => {
+  describe("#templates.create", () => {
+    it("should allow member to create template when memberTemplateManagement is enabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.ReadWrite,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+
+      const res = await server.post("/api/templates.create", member, {
+        body: {
+          collectionId: collection.id,
+          title: "Member template",
+          data: {
+            type: "doc",
+            content: [
+              {
+                type: "paragraph",
+                content: [{ type: "text", text: "hello" }],
+              },
+            ],
+          },
+        },
+      });
+
+      const body = await res.json();
+      expect(res.status).toEqual(200);
+      expect(body.data.title).toEqual("Member template");
+      expect(body.data.collectionId).toEqual(collection.id);
+    });
+
+    it("should not allow member to create template when memberTemplateManagement is disabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.Admin,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+
+      const res = await server.post("/api/templates.create", member, {
+        body: {
+          collectionId: collection.id,
+          title: "Member template",
+          data: {
+            type: "doc",
+            content: [
+              {
+                type: "paragraph",
+                content: [{ type: "text", text: "hello" }],
+              },
+            ],
+          },
+        },
+      });
+
+      expect(res.status).toEqual(403);
+    });
+
+    it("should allow member with explicit read_write membership to create template when enabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        permission: null,
+        templateManagement: CollectionPermission.ReadWrite,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      await UserMembership.create({
+        createdById: admin.id,
+        collectionId: collection.id,
+        userId: member.id,
+        permission: CollectionPermission.ReadWrite,
+      });
+
+      const res = await server.post("/api/templates.create", member, {
+        body: {
+          collectionId: collection.id,
+          title: "Member template",
+          data: {
+            type: "doc",
+            content: [
+              {
+                type: "paragraph",
+                content: [{ type: "text", text: "hello" }],
+              },
+            ],
+          },
+        },
+      });
+
+      const body = await res.json();
+      expect(res.status).toEqual(200);
+      expect(body.data.title).toEqual("Member template");
+    });
+
+    it("should not allow read-only member to create template even when enabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        permission: null,
+        templateManagement: CollectionPermission.ReadWrite,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      await UserMembership.create({
+        createdById: admin.id,
+        collectionId: collection.id,
+        userId: member.id,
+        permission: CollectionPermission.Read,
+      });
+
+      const res = await server.post("/api/templates.create", member, {
+        body: {
+          collectionId: collection.id,
+          title: "Member template",
+          data: {
+            type: "doc",
+            content: [
+              {
+                type: "paragraph",
+                content: [{ type: "text", text: "hello" }],
+              },
+            ],
+          },
+        },
+      });
+
+      expect(res.status).toEqual(403);
+    });
+  });
+
+  describe("#templates.update", () => {
+    it("should allow member to update template when memberTemplateManagement is enabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.ReadWrite,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      const template = await buildTemplate({
+        userId: admin.id,
+        teamId: admin.teamId,
+        collectionId: collection.id,
+      });
+
+      const res = await server.post("/api/templates.update", member, {
+        body: {
+          id: template.id,
+          title: "Updated by member",
+        },
+      });
+
+      const body = await res.json();
+      expect(res.status).toEqual(200);
+      expect(body.data.title).toEqual("Updated by member");
+    });
+
+    it("should not allow member to update template when memberTemplateManagement is disabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.Admin,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      const template = await buildTemplate({
+        userId: admin.id,
+        teamId: admin.teamId,
+        collectionId: collection.id,
+      });
+
+      const res = await server.post("/api/templates.update", member, {
+        body: {
+          id: template.id,
+          title: "Updated by member",
+        },
+      });
+
+      expect(res.status).toEqual(403);
+    });
+  });
+
+  describe("#templates.duplicate", () => {
+    it("should allow member to duplicate template when memberTemplateManagement is enabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.ReadWrite,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      const template = await buildTemplate({
+        userId: admin.id,
+        teamId: admin.teamId,
+        collectionId: collection.id,
+      });
+
+      const res = await server.post("/api/templates.duplicate", member, {
+        body: {
+          id: template.id,
+        },
+      });
+
+      const body = await res.json();
+      expect(res.status).toEqual(200);
+      expect(body.data.collectionId).toEqual(collection.id);
+    });
+
+    it("should not allow member to duplicate template when memberTemplateManagement is disabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.Admin,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      const template = await buildTemplate({
+        userId: admin.id,
+        teamId: admin.teamId,
+        collectionId: collection.id,
+      });
+
+      const res = await server.post("/api/templates.duplicate", member, {
+        body: {
+          id: template.id,
+        },
+      });
+
+      expect(res.status).toEqual(403);
+    });
+  });
+
+  describe("#templates.restore", () => {
+    it("should allow member to restore template when memberTemplateManagement is enabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.ReadWrite,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      const template = await buildTemplate({
+        userId: admin.id,
+        teamId: admin.teamId,
+        collectionId: collection.id,
+      });
+      await template.destroy();
+
+      const res = await server.post("/api/templates.restore", member, {
+        body: {
+          id: template.id,
+        },
+      });
+
+      const body = await res.json();
+      expect(res.status).toEqual(200);
+      expect(body.data.id).toEqual(template.id);
+    });
+
+    it("should not allow member to restore template when memberTemplateManagement is disabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.Admin,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      const template = await buildTemplate({
+        userId: admin.id,
+        teamId: admin.teamId,
+        collectionId: collection.id,
+      });
+      await template.destroy();
+
+      const res = await server.post("/api/templates.restore", member, {
+        body: {
+          id: template.id,
+        },
+      });
+
+      expect(res.status).toEqual(403);
+    });
+  });
+
+  describe("#templates.delete", () => {
+    it("should allow member to delete template when memberTemplateManagement is enabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.ReadWrite,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      const template = await buildTemplate({
+        userId: admin.id,
+        teamId: admin.teamId,
+        collectionId: collection.id,
+      });
+
+      const res = await server.post("/api/templates.delete", member, {
+        body: {
+          id: template.id,
+        },
+      });
+
+      const body = await res.json();
+      expect(res.status).toEqual(200);
+      expect(body.success).toEqual(true);
+    });
+
+    it("should not allow member to delete template when memberTemplateManagement is disabled", async () => {
+      const admin = await buildAdmin();
+      const collection = await buildCollection({
+        userId: admin.id,
+        teamId: admin.teamId,
+        templateManagement: CollectionPermission.Admin,
+      });
+
+      const member = await buildUser({ teamId: admin.teamId });
+      const template = await buildTemplate({
+        userId: admin.id,
+        teamId: admin.teamId,
+        collectionId: collection.id,
+      });
+
+      const res = await server.post("/api/templates.delete", member, {
+        body: {
+          id: template.id,
+        },
+      });
+
+      expect(res.status).toEqual(403);
+    });
   });
 });

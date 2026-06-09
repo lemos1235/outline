@@ -1,5 +1,5 @@
-import last from "lodash/last";
-import sortBy from "lodash/sortBy";
+import { last, sortBy } from "es-toolkit/compat";
+import { t } from "i18next";
 import { v4 as uuidv4 } from "uuid";
 import type MermaidUnsafe from "mermaid";
 import type { IconPack } from "@fortawesome/fontawesome-common-types";
@@ -15,6 +15,7 @@ import { findParentNode } from "../queries/findParentNode";
 import type { NodeWithPos } from "../types";
 import type { Editor } from "../../../app/editor";
 import { LightboxImageFactory } from "../lib/Lightbox";
+import { hashString } from "../../utils/string";
 import { sanitizeUrl } from "../../utils/urls";
 
 export const pluginKey = new PluginKey("mermaid");
@@ -25,21 +26,74 @@ export type MermaidState = {
   editingId?: string;
 };
 
+// The `v2` namespace discards entries cached before the #11782 fix, so
+// previously mis-sized diagrams are re-rendered instead of served from cache.
+const STORAGE_PREFIX = "mermaid:v2:";
+const MAX_STORAGE_ENTRIES = 20;
+
 class Cache {
-  static get(key: string) {
-    return this.data.get(key);
+  /** Get a cached SVG by diagram text and theme. */
+  static get(key: string): string | undefined {
+    try {
+      const hash = hashString(key);
+      const value = sessionStorage.getItem(STORAGE_PREFIX + hash);
+      if (value) {
+        this.touchLru(hash);
+        return value;
+      }
+    } catch {
+      // sessionStorage unavailable
+    }
+    return undefined;
   }
 
+  /** Cache a rendered SVG in sessionStorage. */
   static set(key: string, value: string) {
-    this.data.set(key, value);
-
-    if (this.data.size > this.maxSize) {
-      this.data.delete(this.data.keys().next().value);
+    try {
+      const hash = hashString(key);
+      this.touchLru(hash);
+      this.pruneStorage();
+      sessionStorage.setItem(STORAGE_PREFIX + hash, value);
+    } catch {
+      // sessionStorage full or unavailable
     }
   }
 
-  private static maxSize = 20;
-  private static data: Map<string, string> = new Map();
+  /** Move or append a hash to the end (most recent) of the LRU list. */
+  private static touchLru(hash: string) {
+    const lru = this.getLru();
+    const idx = lru.indexOf(hash);
+    if (idx !== -1) {
+      lru.splice(idx, 1);
+    }
+    lru.push(hash);
+    sessionStorage.setItem(STORAGE_PREFIX + "lru", JSON.stringify(lru));
+  }
+
+  /** Evict least-recently-used entries when over the limit. */
+  private static pruneStorage() {
+    const lru = this.getLru();
+
+    while (lru.length > MAX_STORAGE_ENTRIES) {
+      const evict = lru.shift()!;
+      sessionStorage.removeItem(STORAGE_PREFIX + evict);
+    }
+
+    sessionStorage.setItem(STORAGE_PREFIX + "lru", JSON.stringify(lru));
+  }
+
+  /** Read the LRU order list from sessionStorage. */
+  private static getLru(): string[] {
+    try {
+      const raw = sessionStorage.getItem(STORAGE_PREFIX + "lru");
+      if (raw) {
+        return JSON.parse(raw);
+      }
+    } catch {
+      // corrupted or unavailable
+    }
+    return [];
+  }
 }
 
 let mermaid: typeof MermaidUnsafe;
@@ -104,16 +158,21 @@ class MermaidRenderer {
       return;
     }
 
-    // Create a temporary element that will render the diagram off-screen. This is necessary
-    // as Mermaid will error if the element is not visible or the element is removed while the
-    // diagram is being rendered.
+    // Create a temporary element for rendering. We use visibility:hidden instead of
+    // offscreen positioning so the browser computes correct bounding boxes for SVG
+    // elements — offscreen elements can produce incorrect getBBox() results, leading
+    // to wrong viewBox dimensions (see mermaid-js/mermaid#6146).
     const renderElement = document.createElement("div");
     const tempId =
       "offscreen-mermaid-" + Math.random().toString(36).substr(2, 9);
     renderElement.id = tempId;
-    renderElement.style.position = "absolute";
-    renderElement.style.left = "-9999px";
-    renderElement.style.top = "-9999px";
+    renderElement.style.position = "fixed";
+    renderElement.style.visibility = "hidden";
+    renderElement.style.top = "0";
+    renderElement.style.left = "0";
+    const width = this.editor.view?.dom.clientWidth ?? window.innerWidth;
+    renderElement.style.width = `${width}px`;
+    renderElement.style.zIndex = "-1";
     document.body.appendChild(renderElement);
 
     try {
@@ -167,15 +226,35 @@ class MermaidRenderer {
 
       const { svg, bindFunctions } = await mermaid.render(tempId, text);
 
-      // Cache the rendered SVG so we won't need to calculate it again in the same session
-      if (text) {
-        Cache.set(cacheKey, svg);
-      }
       element.classList.remove("parse-error", "empty");
       element.innerHTML = svg;
 
       // Allow the user to interact with the diagram
       bindFunctions?.(element);
+
+      // Mermaid sizes the SVG from a getBBox() taken in the hidden render
+      // element, which is unreliable on high-DPI/RDP displays and leaves
+      // diagrams too large or too small (#11782). Re-frame from the now-visible
+      // SVG, where getBBox() reflects the real content.
+      const rendered = element.querySelector("svg");
+      if (rendered instanceof SVGSVGElement) {
+        const box = rendered.getBBox();
+        if (box.width > 0 && box.height > 0) {
+          const padding = 8;
+          const frameWidth = box.width + padding * 2;
+          rendered.setAttribute(
+            "viewBox",
+            `${box.x - padding} ${box.y - padding} ${frameWidth} ${box.height + padding * 2}`
+          );
+          rendered.style.width = "100%";
+          rendered.style.maxWidth = `${frameWidth}px`;
+        }
+      }
+
+      // Cache the corrected SVG so we won't need to calculate it again this session
+      if (text) {
+        Cache.set(cacheKey, element.innerHTML);
+      }
     } catch (error) {
       const isEmpty = block.node.textContent.trim().length === 0;
 
@@ -238,8 +317,11 @@ function getNewState({
   const decorations: Decoration[] = [];
   let newEditingId: string | undefined;
 
-  // Find all blocks that represent Mermaid diagrams (supports both "mermaid" and "mermaidjs")
-  const blocks = findBlockNodes(doc).filter((item) => isMermaid(item.node));
+  // Find all blocks that represent Mermaid diagrams (supports both "mermaid" and "mermaidjs"),
+  // descending into containers so diagrams inside toggle blocks are also discovered.
+  const blocks = findBlockNodes(doc, true).filter((item) =>
+    isMermaid(item.node)
+  );
 
   blocks.forEach((block) => {
     const existingDecorations = pluginState.decorationSet.find(
@@ -307,7 +389,7 @@ export default function Mermaid({
   isDark: boolean;
   editor: Editor;
 }) {
-  const { onClickLink, dictionary } = editor.props;
+  const { onClickLink } = editor.props;
 
   return new Plugin({
     key: pluginKey,
@@ -439,6 +521,31 @@ export default function Mermaid({
       decorations(state) {
         return this.getState(state)?.decorationSet;
       },
+      handleKeyDown(view, event) {
+        if (event.key === "Enter" && event.metaKey && !editor.props.readOnly) {
+          const { selection } = view.state;
+          const isNodeSel = selection instanceof NodeSelection;
+          const isMermaidNode =
+            isNodeSel && isMermaid((selection as NodeSelection).node);
+          if (isNodeSel && isMermaidNode) {
+            editor.commands.edit_mermaid();
+            return true;
+          }
+        }
+
+        if (event.key === "Escape") {
+          const mermaidState = pluginKey.getState(view.state) as MermaidState;
+          const codeBlock = findParentNode(isCode)(view.state.selection);
+
+          if (mermaidState?.editingId) {
+            if (codeBlock && isMermaid(codeBlock.node)) {
+              editor.commands.edit_mermaid();
+              return true;
+            }
+          }
+        }
+        return false;
+      },
       handleDOMEvents: {
         click(_view, event: MouseEvent) {
           const target = event.target as HTMLElement;
@@ -510,7 +617,7 @@ export default function Mermaid({
                 onClickLink(sanitizeUrl(href) ?? "");
               }
             } catch (_err) {
-              toast.error(dictionary.openLinkError);
+              toast.error(t("Sorry, that type of link is not supported"));
             }
           }
 

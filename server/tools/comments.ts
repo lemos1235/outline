@@ -1,10 +1,15 @@
+import { v4 as uuidv4 } from "uuid";
 import { z } from "zod";
-import { Op } from "sequelize";
+import { Op, Transaction } from "sequelize";
 import type { FindOptions, WhereOptions } from "sequelize";
+import { sequelize } from "@server/storage/database";
 import type { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { CommentStatusFilter } from "@shared/types";
+import type { CommentMark } from "@shared/utils/ProsemirrorHelper";
 import { commentParser } from "@server/editor";
+import { DocumentHelper } from "@server/models/helpers/DocumentHelper";
+import { ProsemirrorHelper } from "@server/models/helpers/ProsemirrorHelper";
 import { Comment, Collection, Document } from "@server/models";
 import { authorize } from "@server/policies";
 import { presentComment } from "@server/presenters";
@@ -14,8 +19,10 @@ import {
   success,
   buildAPIContext,
   getActorFromContext,
+  optionalString,
   withTracing,
 } from "./util";
+import { ValidationError } from "@server/errors";
 
 /**
  * Presents a comment with a plain-text rendering of its content so that
@@ -23,10 +30,17 @@ import {
  * ProseMirror JSON.
  *
  * @param comment - the comment model instance.
+ * @param commentMarks - optional precomputed comment marks to avoid reparsing.
  * @returns the presented comment with an additional `text` field.
  */
-function presentCommentWithText(comment: Comment) {
-  const presented = presentComment(comment);
+function presentCommentWithText(
+  comment: Comment,
+  commentMarks?: CommentMark[]
+) {
+  const presented = presentComment(comment, {
+    includeAnchorText: true,
+    commentMarks,
+  });
   return {
     ...presented,
     text: comment.toPlainText(),
@@ -53,31 +67,28 @@ export function commentTools(server: McpServer, scopes: string[]) {
           readOnlyHint: true,
         },
         inputSchema: {
-          documentId: z
-            .string()
-            .optional()
-            .describe("The document ID to list comments for."),
-          collectionId: z
-            .string()
-            .optional()
-            .describe("The collection ID to list comments for."),
-          parentCommentId: z
-            .string()
-            .optional()
-            .describe("A parent comment ID to list only its replies."),
+          documentId: optionalString().describe(
+            "The document ID to list comments for."
+          ),
+          collectionId: optionalString().describe(
+            "The collection ID to list comments for."
+          ),
+          parentCommentId: optionalString().describe(
+            "A parent comment ID to list only the replies in that thread."
+          ),
           statusFilter: z
             .array(z.enum(CommentStatusFilter))
             .optional()
             .describe(
               "Filter by resolution status: resolved, unresolved, or both."
             ),
-          offset: z
+          offset: z.coerce
             .number()
             .int()
             .min(0)
             .optional()
             .describe("The pagination offset. Defaults to 0."),
-          limit: z
+          limit: z.coerce
             .number()
             .int()
             .min(1)
@@ -182,7 +193,25 @@ export function commentTools(server: McpServer, scopes: string[]) {
               });
             }
 
-            const presented = comments.map(presentCommentWithText);
+            // Precompute comment marks per document to avoid reparsing
+            // the same document for every comment.
+            const marksCache = new Map<string, CommentMark[]>();
+            const presented = comments.map((comment) => {
+              const doc = comment.document;
+              let marks: CommentMark[] | undefined;
+              if (doc) {
+                if (!marksCache.has(doc.id)) {
+                  marksCache.set(
+                    doc.id,
+                    ProsemirrorHelper.getComments(
+                      DocumentHelper.toProsemirror(doc)
+                    )
+                  );
+                }
+                marks = marksCache.get(doc.id);
+              }
+              return presentCommentWithText(comment, marks);
+            });
             return success(presented);
           } catch (err) {
             return error(err);
@@ -208,36 +237,101 @@ export function commentTools(server: McpServer, scopes: string[]) {
           text: z
             .string()
             .describe("The markdown text content of the comment."),
-          parentCommentId: z
-            .string()
-            .optional()
-            .describe(
-              "The parent comment ID to reply to. Omit for a top-level comment."
-            ),
+          parentCommentId: optionalString().describe(
+            "The parent comment ID to reply to. Omit for a top-level comment."
+          ),
+          anchorText: optionalString().describe(
+            "A plain text substring of the document to anchor this comment to as an inline comment. The first occurrence is used unless anchorPrefix or anchorSuffix is provided, omit for a general document comment."
+          ),
+          anchorPrefix: optionalString().describe(
+            "Only provide this if anchorText appears more than once in the document and you need to target a specific occurrence. Plain text that immediately precedes anchorText."
+          ),
+          anchorSuffix: optionalString().describe(
+            "Only provide this if anchorText appears more than once in the document and you need to target a specific occurrence. Plain text that immediately follows anchorText."
+          ),
         },
       },
       withTracing(
         "create_comment",
-        async ({ documentId, text, parentCommentId }, context) => {
+        async (
+          {
+            documentId,
+            text,
+            parentCommentId,
+            anchorText,
+            anchorPrefix,
+            anchorSuffix,
+          },
+          context
+        ) => {
           try {
             const ctx = buildAPIContext(context);
             const { user } = ctx.state.auth;
 
-            const document = await Document.findByPk(documentId, {
-              userId: user.id,
-            });
-            authorize(user, "comment", document);
-
             const data = commentParser.parse(text).toJSON();
+            const commentId = uuidv4();
 
-            const comment = await Comment.createWithCtx(ctx, {
-              data,
-              createdById: user.id,
-              documentId,
-              parentCommentId,
+            const comment = await sequelize.transaction(async (transaction) => {
+              ctx.state.transaction = transaction;
+              ctx.context.transaction = transaction;
+
+              if (anchorText) {
+                // Acquire the row lock on the document directly when
+                // anchoring so a concurrent comment-mark application can't
+                // overwrite our state update.
+                await Document.unscoped().findOne({
+                  where: { id: documentId },
+                  attributes: ["id"],
+                  transaction,
+                  lock: Transaction.LOCK.UPDATE,
+                });
+              }
+
+              const document = await Document.findByPk(documentId, {
+                userId: user.id,
+                // We only need to load the state binary if applying a comment mark
+                includeState: !!anchorText,
+                transaction,
+              });
+              authorize(user, "comment", document);
+
+              if (anchorText) {
+                if (!document.state) {
+                  throw ValidationError(
+                    "Cannot inline comment on this document"
+                  );
+                }
+
+                const updatedState = ProsemirrorHelper.applyCommentMarkByText({
+                  docState: document.state,
+                  anchorText,
+                  commentId,
+                  userId: user.id,
+                  prefix: anchorPrefix,
+                  suffix: anchorSuffix,
+                });
+
+                if (!updatedState) {
+                  throw ValidationError(
+                    "Could not anchor comment to the provided text in the document"
+                  );
+                }
+
+                await document.updateWithCtx(ctx, { state: updatedState });
+              }
+
+              const created = await Comment.createWithCtx(ctx, {
+                id: commentId,
+                data,
+                createdById: user.id,
+                documentId,
+                parentCommentId,
+              });
+
+              created.createdBy = user;
+              created.document = document!;
+              return created;
             });
-
-            comment.createdBy = user;
 
             const presented = presentCommentWithText(comment);
             return {
@@ -292,6 +386,9 @@ export function commentTools(server: McpServer, scopes: string[]) {
             userId: user.id,
           });
 
+          authorize(user, "read", comment);
+          authorize(user, "read", document);
+
           if (text !== undefined) {
             authorize(user, "update", comment);
             authorize(user, "comment", document);
@@ -312,6 +409,7 @@ export function commentTools(server: McpServer, scopes: string[]) {
 
           await comment.saveWithCtx(ctx, status ? { silent: true } : undefined);
 
+          comment.document = document!;
           const presented = presentCommentWithText(comment);
           return {
             content: [

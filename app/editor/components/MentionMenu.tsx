@@ -47,7 +47,7 @@ type Props = Omit<
   "renderMenuItem" | "items" | "embeds"
 >;
 
-function MentionMenu({ search, isActive, ...rest }: Props) {
+function MentionMenu({ search = "", isActive, ...rest }: Props) {
   const [loaded, setLoaded] = useState(false);
   const { t } = useTranslation();
   const { auth, documents, users, collections, groups } = useStores();
@@ -69,7 +69,7 @@ function MentionMenu({ search, isActive, ...rest }: Props) {
         res.data.collections.map(collections.add);
         res.data.groups.map(groups.add);
       });
-    }, [search, documents, users, collections])
+    }, [search, documents, users, collections, groups, maxResultsInSection])
   );
 
   useEffect(() => {
