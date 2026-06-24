@@ -8,8 +8,7 @@ import documentCreator, {
 import documentMover from "@server/commands/documentMover";
 import documentRestorer from "@server/commands/documentRestorer";
 import documentUpdater from "@server/commands/documentUpdater";
-import { Op } from "sequelize";
-import { Collection, Document } from "@server/models";
+import { Collection, Document, Template } from "@server/models";
 import { sequelize } from "@server/storage/database";
 import { authorize, can } from "@server/policies";
 import {
@@ -30,7 +29,7 @@ import {
   pathToUrl,
   withTracing,
 } from "./util";
-import { TextEditMode } from "@shared/types";
+import { StatusFilter, TextEditMode } from "@shared/types";
 import SearchProviderManager from "@server/utils/SearchProviderManager";
 
 /**
@@ -201,21 +200,17 @@ export function documentTools(server: McpServer, scopes: string[]) {
               return success(presented);
             }
 
-            const collectionIds = collectionId
-              ? [collectionId]
-              : await user.collectionIds();
-
-            const documents = await Document.findAll({
-              where: {
-                teamId: user.teamId,
-                collectionId: collectionIds,
-                archivedAt: { [Op.eq]: null },
-                deletedAt: { [Op.eq]: null },
-              },
-              order: [["updatedAt", "DESC"]],
+            // List recent documents via the search provider (with no query) so
+            // access control matches the search path exactly.
+            const searchProvider = SearchProviderManager.getProvider();
+            const { results } = await searchProvider.searchForUser(user, {
+              collectionId,
               offset: effectiveOffset,
               limit: effectiveLimit,
+              statusFilter: [StatusFilter.Published],
             });
+
+            const documents = results.map((result) => result.document);
 
             const breadcrumbs = await getBreadcrumbsForDocuments(
               documents,
@@ -301,13 +296,15 @@ export function documentTools(server: McpServer, scopes: string[]) {
       {
         title: "Create document",
         description:
-          "Creates a new document. Requires a collectionId to place the document in a collection, or parentDocumentId to nest it under an existing document.",
+          "Creates a new document. Requires a collectionId to place the document in a collection, or parentDocumentId to nest it under an existing document. Pass a templateId (from list_templates) to pre-fill the document from a template; the template's content is used unless text is also provided.",
         annotations: {
           idempotentHint: false,
           readOnlyHint: false,
         },
         inputSchema: {
-          title: z.string().describe("The title of the document."),
+          title: optionalString().describe(
+            "The title of the document. Defaults to the template's title when a templateId is provided."
+          ),
           text: z
             .string()
             .optional()
@@ -317,6 +314,9 @@ export function documentTools(server: McpServer, scopes: string[]) {
           ),
           parentDocumentId: optionalString().describe(
             "The parent document ID to nest this document under."
+          ),
+          templateId: optionalString().describe(
+            "The ID of a template to pre-fill the new document from. The template's title, content, icon, and color are used unless overridden by the corresponding parameters."
           ),
           icon: optionalString().describe(
             "An icon for the document, e.g. an emoji."
@@ -340,7 +340,7 @@ export function documentTools(server: McpServer, scopes: string[]) {
       },
       withTracing("create_document", async (input, context) => {
         try {
-          const { collectionId, parentDocumentId } = input;
+          const { collectionId, parentDocumentId, templateId } = input;
           const ctx = buildAPIContext(context);
           const { user } = ctx.state.auth;
 
@@ -348,6 +348,14 @@ export function documentTools(server: McpServer, scopes: string[]) {
             collectionId,
             parentDocumentId,
           });
+
+          let template: Template | null | undefined;
+          if (templateId) {
+            template = await Template.findByPk(templateId, {
+              userId: user.id,
+            });
+            authorize(user, "read", template);
+          }
 
           const document = await documentCreator(ctx, {
             title: input.title,
@@ -357,6 +365,7 @@ export function documentTools(server: McpServer, scopes: string[]) {
             parentDocumentId: parentDocumentId,
             publish: input.publish !== false,
             collectionId: collection?.id,
+            template,
             fullWidth: input.fullWidth,
           });
 
