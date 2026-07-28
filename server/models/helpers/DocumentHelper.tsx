@@ -1,3 +1,4 @@
+import type { JSDOM } from "jsdom";
 import { Node, Fragment, type NodeType } from "prosemirror-model";
 import ukkonen from "ukkonen";
 import { updateYFragment, yDocToProsemirrorJSON } from "y-prosemirror";
@@ -6,6 +7,7 @@ import {
   ChangesetHelper,
   type ExtendedChange,
 } from "@shared/editor/lib/ChangesetHelper";
+import headingToSlug from "@shared/editor/lib/headingToSlug";
 import textBetween from "@shared/editor/lib/textBetween";
 import { EditorStyleHelper } from "@shared/editor/styles/EditorStyleHelper";
 import type { NavigationNode, ProsemirrorData } from "@shared/types";
@@ -180,6 +182,86 @@ export class DocumentHelper {
   }
 
   /**
+   * Returns the Markdown content of the section beginning at the heading that
+   * matches the given anchor. A section spans from the matched heading up to
+   * (but not including) the next heading of the same or higher level.
+   *
+   * @param document The document or revision or prosemirror data to extract from
+   * @param anchor The heading anchor to locate, with or without a leading "#"
+   * @returns the section content as Markdown, or undefined if no heading matches.
+   */
+  static getAnchorContent(
+    document: Document | Revision | ProsemirrorData,
+    anchor: string
+  ): string | undefined {
+    let id = anchor.replace(/^#/, "");
+    try {
+      id = decodeURIComponent(id);
+    } catch {
+      // Keep the raw anchor if it cannot be decoded.
+    }
+    if (!id) {
+      return undefined;
+    }
+
+    const node = DocumentHelper.toProsemirror(document);
+
+    // Headings are always top-level nodes, so iterating the document's direct
+    // children is sufficient to locate the section.
+    const children: Node[] = [];
+    node.content.forEach((child) => children.push(child));
+
+    const previouslySeen: Record<string, number> = {};
+    let startIndex = -1;
+    let level = 0;
+
+    for (let i = 0; i < children.length; i++) {
+      const child = children[i];
+      if (child.type.name !== "heading") {
+        continue;
+      }
+
+      // Calculate the heading id using the same de-duplication logic as the
+      // editor so that anchors to repeated headings resolve correctly.
+      const slug = headingToSlug(child);
+      const headingId =
+        previouslySeen[slug] > 0
+          ? headingToSlug(child, previouslySeen[slug])
+          : slug;
+      previouslySeen[slug] =
+        previouslySeen[slug] !== undefined ? previouslySeen[slug] + 1 : 1;
+
+      if (startIndex === -1 && headingId === id) {
+        startIndex = i;
+        level = child.attrs.level;
+      }
+    }
+
+    if (startIndex === -1) {
+      return undefined;
+    }
+
+    const sectionNodes: Node[] = [children[startIndex]];
+    for (let i = startIndex + 1; i < children.length; i++) {
+      const child = children[i];
+      if (child.type.name === "heading" && child.attrs.level <= level) {
+        break;
+      }
+      sectionNodes.push(child);
+    }
+
+    const sectionDoc = schema.topNodeType.create(
+      null,
+      Fragment.fromArray(sectionNodes)
+    );
+
+    return serializer
+      .serialize(sectionDoc)
+      .replace(/(^|\n)\\(\n|$)/g, "\n\n")
+      .trim();
+  }
+
+  /**
    * Returns the document as Markdown. This is a lossy conversion and should only be used for export.
    *
    * @param document The document or revision to convert
@@ -350,13 +432,14 @@ export class DocumentHelper {
    * @param before The before document
    * @param after The after document
    * @param options Options passed to HTML generation
-   * @returns The diff as a HTML string
+   * @returns The diff as an HTML string, an empty string when there is no
+   * before document, or undefined when the documents contain no changes.
    */
   static async toEmailDiff(
     before: Document | Revision | null,
     after: Revision,
     options?: HTMLOptions
-  ) {
+  ): Promise<string | undefined> {
     if (!before) {
       return "";
     }
@@ -365,8 +448,26 @@ export class DocumentHelper {
     // Loaded lazily to keep jsdom off the startup path — only HTML export needs it.
     const { JSDOM } = await import("jsdom");
     const dom = new JSDOM(html);
-    const doc = dom.window.document;
+    try {
+      return DocumentHelper.clipEmailDiff(dom.window.document);
+    } finally {
+      try {
+        dom.window.close();
+      } catch (_err) {
+        // Best effort, closing the window releases its timers and resources.
+      }
+    }
+  }
 
+  /**
+   * Clips a rendered diff document down to only the changed nodes and their
+   * surrounding context, returning the resulting HTML or undefined when the
+   * document contains no diff elements.
+   *
+   * @param doc The rendered diff document to clip.
+   * @returns The clipped HTML, or undefined when there is nothing to show.
+   */
+  private static clipEmailDiff(doc: JSDOM["window"]["document"]) {
     const containsDiffElement = (node: Element | null) => {
       if (!node) {
         return false;

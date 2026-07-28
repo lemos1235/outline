@@ -1,5 +1,6 @@
 import type { JobOptions } from "bull";
 import { chunk, truncate, uniqBy } from "es-toolkit/compat";
+import httpErrors from "http-errors";
 import { Fragment, Node } from "prosemirror-model";
 import type { WhereOptions } from "sequelize";
 import { Transaction } from "sequelize";
@@ -21,6 +22,7 @@ import {
   ImportTaskState,
 } from "@shared/types";
 import { toError } from "@shared/utils/error";
+import { isExternalUrl } from "@shared/utils/urls";
 import { createContext } from "@server/context";
 import { schema } from "@server/editor";
 import Logger from "@server/logging/Logger";
@@ -98,8 +100,25 @@ export default abstract class APIImportTask<
         await importTask.save();
       }
 
+      if (this.isNonRetryable(err)) {
+        await this.onFailed({ importTaskId });
+      }
+
       throw err; // throw error for retry.
     }
+  }
+
+  /**
+   * Whether a failure is deterministic and therefore not worth retrying. A
+   * 4xx-class error raised by our own error factories signals invalid source
+   * data (a missing file in an export, an unparseable document) rather than a
+   * transient problem such as a network or storage blip.
+   *
+   * @param err The error thrown while performing the task.
+   * @returns true when retrying the task cannot succeed.
+   */
+  private isNonRetryable(err: unknown): boolean {
+    return httpErrors.isHttpError(err) && err.status >= 400 && err.status < 500;
   }
 
   /**
@@ -365,7 +384,14 @@ export default abstract class APIImportTask<
         return { url, name: name.length !== 0 ? name : node.type.name };
       }),
       "url"
-    );
+    ).filter((item) => isExternalUrl(item.url));
+
+    // Nothing remote to download — content already points at internal
+    // attachments (e.g. a Markdown zip's local files resolved to redirect
+    // URLs), so leave the doc untouched.
+    if (!attachmentsData.length) {
+      return doc;
+    }
 
     await sequelize.transaction(async (transaction) => {
       const dbPromises = attachmentsData.map(async (item) => {
@@ -436,14 +462,23 @@ export default abstract class APIImportTask<
       const attrs = json.attrs ?? {};
 
       if (node.type.name === "attachment") {
-        const attachmentModel = urlToAttachment[attrs.href as string];
         // attachment node uses 'href' attribute.
+        const attachmentModel = urlToAttachment[attrs.href as string];
+        // Nodes already pointing at internal attachments aren't in the map;
+        // leave them untouched.
+        if (!attachmentModel) {
+          return node;
+        }
         attrs.href = attachmentModel.redirectUrl;
         // attachment node can have id.
         attrs.id = attachmentModel.id;
       } else if (node.type.name === "image" || node.type.name === "video") {
         // image & video nodes use 'src' attribute.
-        attrs.src = urlToAttachment[attrs.src as string].redirectUrl;
+        const attachmentModel = urlToAttachment[attrs.src as string];
+        if (!attachmentModel) {
+          return node;
+        }
+        attrs.src = attachmentModel.redirectUrl;
       }
 
       json.attrs = attrs;
