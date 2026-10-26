@@ -17,14 +17,30 @@ import {
   UserSuspendedError,
 } from "../errors";
 
-type AuthenticationOptions = {
+type BaseAuthenticationOptions = {
   /** Role required to access the route. */
   role?: UserRole;
   /** Type of authentication required to access the route. */
   type?: AuthenticationType | AuthenticationType[];
-  /** Authentication is parsed, but optional. */
-  optional?: boolean;
+  /** Transports the token may be received from, defaults to all. */
+  transports?: AuthTransport[];
 };
+
+type AuthenticationOptions =
+  | (BaseAuthenticationOptions & {
+      /** Authentication is required. */
+      optional?: false;
+      skip?: never;
+    })
+  | (BaseAuthenticationOptions & {
+      /** Authentication is parsed, but optional. */
+      optional: true;
+      /**
+       * Returns true when the request is authorized by other means, in which
+       * case any credentials on the request are ignored rather than parsed.
+       */
+      skip?: (ctx: AppContext) => boolean;
+    });
 
 type AuthTransport = "cookie" | "header" | "body" | "query";
 
@@ -37,6 +53,11 @@ type AuthInput = {
 
 export default function auth(options: AuthenticationOptions = {}) {
   return async function authMiddleware(ctx: AppContext, next: Next) {
+    if (options.skip?.(ctx)) {
+      ctx.state.auth = {};
+      return next();
+    }
+
     try {
       const { type, token, user, service, scope } =
         await validateAuthentication(ctx, options);
@@ -82,10 +103,18 @@ export default function auth(options: AuthenticationOptions = {}) {
  * Parses the authentication token from the request context.
  *
  * @param ctx The application context containing the request information.
+ * @param transports The transports to read the token from, defaults to all.
  * @returns An object containing the token and its transport method.
  */
-export function parseAuthentication(ctx: AppContext): AuthInput {
-  const authorizationHeader = ctx.request.get("authorization");
+export function parseAuthentication(
+  ctx: AppContext,
+  transports?: AuthTransport[]
+): AuthInput {
+  const isAllowed = (transport: AuthTransport) =>
+    !transports || transports.includes(transport);
+  const authorizationHeader = isAllowed("header")
+    ? ctx.request.get("authorization")
+    : undefined;
 
   if (authorizationHeader) {
     const parts = authorizationHeader.split(" ");
@@ -106,6 +135,7 @@ export function parseAuthentication(ctx: AppContext): AuthInput {
       );
     }
   } else if (
+    isAllowed("body") &&
     ctx.request.body &&
     typeof ctx.request.body === "object" &&
     "token" in ctx.request.body
@@ -114,12 +144,12 @@ export function parseAuthentication(ctx: AppContext): AuthInput {
       token: String(ctx.request.body.token),
       transport: "body",
     };
-  } else if (ctx.request.query?.token) {
+  } else if (isAllowed("query") && ctx.request.query?.token) {
     return {
       token: String(ctx.request.query.token),
       transport: "query",
     };
-  } else {
+  } else if (isAllowed("cookie")) {
     const accessToken = ctx.cookies.get("accessToken");
     if (accessToken) {
       return {
@@ -145,7 +175,7 @@ async function validateAuthentication(
   service?: string;
   scope?: string[];
 }> {
-  const { token, transport } = parseAuthentication(ctx);
+  const { token, transport } = parseAuthentication(ctx, options.transports);
 
   if (!token) {
     throw AuthenticationError("Authentication required");

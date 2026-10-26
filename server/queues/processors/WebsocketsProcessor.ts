@@ -9,6 +9,7 @@ import {
   GroupMembership,
   GroupUser,
   Pin,
+  Share,
   Star,
   Team,
   Subscription,
@@ -26,6 +27,7 @@ import {
   presentFileOperation,
   presentGroup,
   presentPin,
+  presentShare,
   presentStar,
   presentSubscription,
   presentTeam,
@@ -131,18 +133,25 @@ export default class WebsocketsProcessor {
         const documentToPresent = await presentDocument(undefined, document);
 
         const channels = await this.getDocumentEventChannels(event, document);
+        channels.push(`user-${document.createdById}`);
 
-        // We need to add the collection channel to let the members update the doc structure.
         // In case draft is detached from a collection, fallback to previous attribute to get the right one.
         const collectionId =
           event.collectionId ?? event.changes?.previous.collectionId;
 
-        channels.push(`collection-${collectionId}`);
-
-        return socketio.to(channels).emit(event.name, {
+        socketio.to(channels).emit(event.name, {
           document: documentToPresent,
           collectionId,
         });
+
+        // Other collection members only receive the ID so they can remove the draft.
+        return socketio
+          .to(`collection-${collectionId}`)
+          .except(channels)
+          .emit(event.name, {
+            document: { id: document.id },
+            collectionId,
+          });
       }
 
       case "documents.unarchive": {
@@ -614,6 +623,27 @@ export default class WebsocketsProcessor {
           });
       }
 
+      case "shares.create":
+      case "shares.update": {
+        const share = await Share.scope("withDrafts").findByPk(event.modelId);
+        if (!share) {
+          return;
+        }
+
+        const operator = await this.getShareEventOperator(socketio, share);
+        return operator?.emit(event.name, presentShare(share));
+      }
+
+      case "shares.revoke": {
+        const share = await Share.scope("withDrafts").findByPk(event.modelId);
+        if (!share) {
+          return;
+        }
+
+        const operator = await this.getShareEventOperator(socketio, share);
+        return operator?.emit(event.name, { modelId: event.modelId });
+      }
+
       case "comments.create":
       case "comments.update": {
         const comment = await Comment.findByPk(event.modelId, {
@@ -734,7 +764,7 @@ export default class WebsocketsProcessor {
           return;
         }
         return socketio
-          .to(`team-${group.teamId}`)
+          .to(`team-${group.teamId}.members`)
           .emit(event.name, await presentGroup(group));
       }
 
@@ -751,7 +781,7 @@ export default class WebsocketsProcessor {
         }
 
         socketio
-          .to(`team-${event.teamId}`)
+          .to(`team-${event.teamId}.members`)
           .emit("groups.add_user", presentGroupUser(groupUser));
         socketio
           .in(`user-${event.userId}`)
@@ -801,7 +831,7 @@ export default class WebsocketsProcessor {
 
         // let everyone with access to the group know a user was removed
         socketio
-          .to(`team-${event.teamId}`)
+          .to(`team-${event.teamId}.members`)
           .emit("groups.remove_user", membership);
         socketio
           .in(`user-${event.userId}`)
@@ -852,7 +882,7 @@ export default class WebsocketsProcessor {
       }
 
       case "groups.delete": {
-        socketio.to(`team-${event.teamId}`).emit(event.name, {
+        socketio.to(`team-${event.teamId}.members`).emit(event.name, {
           modelId: event.modelId,
         });
         socketio
@@ -971,6 +1001,7 @@ export default class WebsocketsProcessor {
         }
 
         const membersRoom = `team-${user.teamId}.members`;
+        const guestsRoom = `team-${user.teamId}.guests`;
         const accessibleCollectionIds = await user.collectionIds({
           skipCache: true,
         });
@@ -986,11 +1017,13 @@ export default class WebsocketsProcessor {
             .filter((id) => !accessibleCollectionIdsSet.has(id))
             .map((id) => `collection-${id}`);
 
+          socketio.in(`user-${user.id}`).socketsJoin(guestsRoom);
           return socketio
             .in(`user-${user.id}`)
             .socketsLeave([membersRoom, ...inaccessibleRooms]);
         }
 
+        socketio.in(`user-${user.id}`).socketsLeave(guestsRoom);
         return socketio
           .in(`user-${user.id}`)
           .socketsJoin([
@@ -1043,6 +1076,50 @@ export default class WebsocketsProcessor {
     }
 
     return channels;
+  }
+
+  /**
+   * Returns the broadcast operator for share events. The audience matches the
+   * shares.info policy: non-guest users who can read the shared collection or
+   * document.
+   *
+   * @param socketio the socket.io server.
+   * @param share the share with its document loaded.
+   * @returns the broadcast operator to emit to, or null if there is no audience.
+   */
+  private async getShareEventOperator(socketio: Server, share: Share) {
+    const rooms: string[] = [];
+    const collectionId = share.collectionId ?? share.document?.collectionId;
+
+    if (collectionId) {
+      rooms.push(`collection-${collectionId}`);
+    } else if (share.document) {
+      rooms.push(`user-${share.document.createdById}`);
+    }
+
+    if (share.document) {
+      const [userMemberships, groupMemberships] = await Promise.all([
+        UserMembership.findAll({
+          attributes: ["userId"],
+          where: { documentId: share.document.id },
+        }),
+        GroupMembership.findAll({
+          attributes: ["groupId"],
+          where: { documentId: share.document.id },
+        }),
+      ]);
+
+      rooms.push(
+        ...userMemberships.map((membership) => `user-${membership.userId}`),
+        ...groupMemberships.map((membership) => `group-${membership.groupId}`)
+      );
+    }
+
+    if (rooms.length === 0) {
+      return null;
+    }
+
+    return socketio.to(uniq(rooms)).except(`team-${share.teamId}.guests`);
   }
 
   private async getDocumentEventChannels(

@@ -1,9 +1,16 @@
+import { OAuthError } from "@node-oauth/oauth2-server";
 import type { Context, Next } from "koa";
 import {
   ValidationError as SequelizeValidationError,
   EmptyResultError as SequelizeEmptyResultError,
 } from "sequelize";
 import { errToString } from "@shared/utils/error";
+import Logger from "@server/logging/Logger";
+
+interface OAuthErrorBody {
+  error: string;
+  error_description: string;
+}
 
 /** Extract the first numeric status-like property from an unknown error. */
 function statusCodeFromError(err: unknown): number {
@@ -31,36 +38,61 @@ export default function oauthErrorHandler() {
     try {
       await next();
     } catch (err) {
+      let status: number;
+      let body: OAuthErrorBody;
+
       if (err instanceof SequelizeEmptyResultError) {
-        ctx.status = 404;
-        ctx.body = {
+        status = 404;
+        body = {
           error: "invalid_request",
           error_description: "Resource not found",
         };
-        return;
-      }
-      if (err instanceof SequelizeValidationError) {
-        ctx.status = 400;
-        ctx.body = {
+      } else if (err instanceof SequelizeValidationError) {
+        status = 400;
+        body = {
           error: "invalid_request",
           error_description: err.errors[0].message,
         };
-        return;
+      } else {
+        status = statusCodeFromError(err);
+        // Map common HTTP status codes to OAuth error types
+        let errorType = "server_error";
+        if (err instanceof OAuthError && status < 500) {
+          // Keep the library's error code, as clients act on it.
+          errorType = err.name;
+        } else if (
+          err instanceof Error &&
+          "id" in err &&
+          err.id === "invalid_redirect_uri"
+        ) {
+          errorType = "invalid_redirect_uri";
+        } else if (status === 400) {
+          errorType = "invalid_request";
+        } else if (
+          status === 401 ||
+          (err instanceof Error &&
+            "id" in err &&
+            err.id === "invalid_client_metadata")
+        ) {
+          errorType = "invalid_client";
+        }
+
+        body = {
+          error: errorType,
+          error_description: errToString(err),
+        };
       }
 
-      ctx.status = statusCodeFromError(err);
-      // Map common HTTP status codes to OAuth error types
-      let errorType = "server_error";
-      if (ctx.status === 400) {
-        errorType = "invalid_request";
-      } else if (ctx.status === 401) {
-        errorType = "invalid_client";
-      }
+      ctx.status = status;
+      ctx.body = body;
 
-      ctx.body = {
-        error: errorType,
-        error_description: errToString(err),
-      };
+      if (status < 500) {
+        Logger.info("authentication", "OAuth request rejected", {
+          path: ctx.path,
+          status,
+          ...body,
+        });
+      }
     }
   };
 }

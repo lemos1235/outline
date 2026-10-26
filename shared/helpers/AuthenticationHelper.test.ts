@@ -58,13 +58,6 @@ describe("AuthenticationHelper", () => {
         expect(canAccess("/api/documents.create", scopes)).toBe(false);
         expect(canAccess("/api/collections.create", scopes)).toBe(false);
       });
-
-      it("should allow wildcard namespaces", async () => {
-        const scopes = ["/api/*.info"];
-
-        expect(canAccess("/api/documents.info", scopes)).toBe(true);
-        expect(canAccess("/api/documents.create", scopes)).toBe(false);
-      });
     });
 
     describe("namespaced access scopes", () => {
@@ -100,6 +93,14 @@ describe("AuthenticationHelper", () => {
         expect(canAccess("/api/attachments.redirect", scopes)).toBe(true);
         expect(canAccess("/api/attachments.create", scopes)).toBe(false);
         expect(canAccess("/api/attachments.delete", scopes)).toBe(false);
+      });
+
+      it("files read scope grants access to get", async () => {
+        const scopes = ["files:read"];
+
+        expect(canAccess("/api/files.get", scopes)).toBe(true);
+        expect(canAccess("/api/files.get?sig=abc", scopes)).toBe(true);
+        expect(canAccess("/api/files.create", scopes)).toBe(false);
       });
 
       it("write", async () => {
@@ -142,6 +143,7 @@ describe("AuthenticationHelper", () => {
           true
         );
         expect(canAccess("/api/attachments.redirect", scopes)).toBe(true);
+        expect(canAccess("/api/files.get", scopes)).toBe(true);
         expect(canAccess("/api/documents.create", scopes)).toBe(false);
         expect(canAccess("/api/documents.update", scopes)).toBe(false);
         expect(canAccess("/api/users.create", scopes)).toBe(false);

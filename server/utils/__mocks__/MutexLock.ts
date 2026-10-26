@@ -13,19 +13,29 @@ export class MutexLock {
   });
 
   /**
+   * Runs the routine without a lock.
+   */
+  public static using = vi.fn(
+    (
+      _resource: string,
+      _timeout: number,
+      routine: (signal: AbortSignal) => unknown
+    ) => routine(new AbortController().signal)
+  );
+
+  /**
+   * Runs the routine without a lock.
+   */
+  public static tryUsing = vi.fn(
+    (
+      _resource: string,
+      _timeout: number,
+      routine: (signal: AbortSignal) => unknown
+    ) => routine(new AbortController().signal)
+  );
+
+  /**
    * Releases a mock lock.
    */
   public static release = vi.fn().mockResolvedValue(true);
-
-  /**
-   * Returns the mock redlock instance
-   */
-  public static get lock() {
-    return {
-      acquire: vi.fn().mockResolvedValue({
-        release: vi.fn().mockResolvedValue(true),
-        expiration: Date.now() + 10000,
-      }),
-    };
-  }
 }
